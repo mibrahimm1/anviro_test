@@ -45,43 +45,57 @@ def extract_entities(text: str) -> List[str]:
             seen.add(e)
     return deduped
 
-def generate_tags_with_groq(text: str, max_tags: int = 5) -> List[str]:
-    """Generate tags using Groq API (LLaMA3)."""
+def generate_tags_with_groq(text: str, entities: List[str], max_tags: int = 5) -> List[str]:
+    """Generate meaningful contextual tags using Groq (LLaMA3)."""
     if not GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY not configured")
 
-    prompt = (
-        "You are a concise tag generator. Given the text below, return a JSON array "
-        f"of 3 to {max_tags} short tags (each 1–3 words) summarizing key topics or entities. "
-        "Respond ONLY with the JSON array and nothing else.\n\n"
-        f"Text:\n{text}\n\n"
-        "Example output:\n"
-        '["tag1","tag2","tag3"]'
-    )
+    entities_list = ", ".join(entities) if entities else "None"
 
-    # Call Chat
+    prompt = f"""
+You are an intelligent tag generator.
+
+Given the text below, create {max_tags} short descriptive tags (each 1–3 words)
+that summarize the *context, purpose, or theme* of the text.
+
+DO NOT repeat any of these entity names:
+{entities_list}
+
+Focus on intent or activity — for example:
+- If the text describes travel or meetings, tags could include "business trip", "meeting", "schedule".
+- If it describes a product launch, tags could include "product launch", "marketing", "announcement".
+
+Return ONLY a valid JSON array of lowercase strings.
+
+Example:
+["business trip", "meeting", "schedule"]
+
+Text:
+{text}
+"""
+
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",  # available Groq model
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
-        max_tokens=150,
+        model="llama3-8b-8192",
+        messages=[{"role": "user", "content": prompt.strip()}],
+        temperature=0.4,
+        max_tokens=120,
     )
 
     content = response.choices[0].message["content"].strip()
 
-    # Parse JSON
-    import json
+    import json, re
     try:
+        # clean stray markdown or text
+        content = re.sub(r"^```(?:json)?|```$", "", content).strip()
         tags = json.loads(content)
-        if isinstance(tags, list):
-            return [str(t).strip() for t in tags][:max_tags]
+        if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
+            return [t.strip() for t in tags][:max_tags]
         else:
-            raise ValueError("Invalid JSON format")
+            raise ValueError("Response not a valid JSON list of strings")
     except Exception:
-        # fallback if not valid JSON
-        fallback = content.strip("[]").replace("\n", ",")
-        parts = [p.strip().strip('"').strip("'") for p in fallback.split(",") if p.strip()]
-        return parts[:max_tags]
+        # Only fallback if Groq completely fails
+        return ["context extraction failed"]
+
 
 @app.post("/extract", response_model=ExtractOut)
 async def extract_endpoint(payload: TextIn):
@@ -91,7 +105,7 @@ async def extract_endpoint(payload: TextIn):
 
     entities = extract_entities(text)
     try:
-        tags = generate_tags_with_groq(text)
+        tags = generate_tags_with_groq(text, entities)
     except Exception as e:
         logging.exception("Groq tag generation failed, returning fallback tags")
         tags = entities[:5]  # fallback
@@ -100,6 +114,6 @@ async def extract_endpoint(payload: TextIn):
 @app.get("/")
 def root():
     return {
-        "message": "Smart Entity Extraction Microservice (Groq-powered)",
+        "message": "Smart Entity Extraction Microservice - Ibrahim Shaikh",
         "usage": "POST /extract with JSON { 'text': '...' }"
     }
