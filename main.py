@@ -11,6 +11,7 @@ from groq import Groq
 
 load_dotenv()
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+print("GROQ_API_KEY:", GROQ_API_KEY)
 
 groq_client = Groq(api_key=GROQ_API_KEY)
 
@@ -21,7 +22,7 @@ except Exception as e:
         "spaCy model 'en_core_web_sm' not found. Install it with: python -m spacy download en_core_web_sm"
     ) from e
 
-app = FastAPI(title="Smart Entity Extraction Microservice (Groq-powered)")
+app = FastAPI(title="Smart Entity Extraction Microservice")
 
 class TextIn(BaseModel):
     text: str
@@ -53,48 +54,69 @@ def generate_tags_with_groq(text: str, entities: List[str], max_tags: int = 5) -
     entities_list = ", ".join(entities) if entities else "None"
 
     prompt = f"""
-You are an intelligent tag generator.
+You are a professional assistant that summarizes the *context* of a text using short descriptive tags.
 
-Given the text below, create {max_tags} short descriptive tags (each 1–3 words)
-that summarize the *context, purpose, or theme* of the text.
+## TASK:
+Given a piece of text, generate {max_tags} concise tags (1–3 words each) that describe the *purpose, action, or situation* — not the named entities.
 
-DO NOT repeat any of these entity names:
-{entities_list}
+## DO NOT:
+- Repeat or include these entities: {entities_list}
+- Mention people's names, organizations, or locations.
 
-Focus on intent or activity — for example:
-- If the text describes travel or meetings, tags could include "business trip", "meeting", "schedule".
-- If it describes a product launch, tags could include "product launch", "marketing", "announcement".
+## DO:
+- Focus on the meaning or event (e.g., travel, meetings, deals, reports, etc.)
+- Return only a JSON array of lowercase strings.
 
-Return ONLY a valid JSON array of lowercase strings.
+## EXAMPLES
 
-Example:
+Input:
+"John Doe from Acme Corp traveled to New York on July 20 for a business meeting."
+Output:
 ["business trip", "meeting", "schedule"]
 
-Text:
+---
+
+Input:
+"Apple unveiled the new iPhone 16 during their launch event in California."
+Output:
+["product launch", "technology", "marketing"]
+
+---
+
+Input:
+"Sarah joined Microsoft as a software engineer."
+Output:
+["career move", "hiring", "tech industry"]
+
+---
+
+Now analyze this text and produce only the JSON array of {max_tags} tags:
+
 {text}
 """
-
     response = groq_client.chat.completions.create(
-        model="llama3-8b-8192",
+        model="llama-3.1-8b-instant",
         messages=[{"role": "user", "content": prompt.strip()}],
         temperature=0.4,
-        max_tokens=120,
+        max_tokens=150,
     )
 
-    content = response.choices[0].message["content"].strip()
-
     import json, re
+
+    content = response.choices[0].message.content.strip()
+
+    # Clean and parse JSON safely
+    content = re.sub(r"^```(?:json)?|```$", "", content).strip()
     try:
-        # clean stray markdown or text
-        content = re.sub(r"^```(?:json)?|```$", "", content).strip()
         tags = json.loads(content)
         if isinstance(tags, list) and all(isinstance(t, str) for t in tags):
-            return [t.strip() for t in tags][:max_tags]
+            # remove duplicates, lowercase
+            tags = list(dict.fromkeys([t.lower().strip() for t in tags]))
+            return tags[:max_tags]
         else:
-            raise ValueError("Response not a valid JSON list of strings")
+            raise ValueError("Invalid JSON response")
     except Exception:
-        # Only fallback if Groq completely fails
-        return ["context extraction failed"]
+        return ["tag extraction failed"]
 
 
 @app.post("/extract", response_model=ExtractOut)
@@ -108,7 +130,7 @@ async def extract_endpoint(payload: TextIn):
         tags = generate_tags_with_groq(text, entities)
     except Exception as e:
         logging.exception("Groq tag generation failed, returning fallback tags")
-        tags = entities[:5]  # fallback
+        tags = entities[:5]
     return {"entities": entities, "tags": tags, "meta": {"len_text": len(text)}}
 
 @app.get("/")
